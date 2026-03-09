@@ -1,26 +1,30 @@
 import time
 
 
-def process_massive_data(data_list: list):
+def process_in_chunks(total_data: list, chunk_size: int = 10000):
     """
-    High-speed data processing engine for security logs.
+    Logic: Process massive data in small batches (chunks)
+    to prevent memory overflow. Essential for AI Data Ingestion.
     """
     start_time = time.time()
-    total_records = len(data_list)
-    blocked_ips = []
+    processed_count = 0
+    threats_found = 0
 
-    # Filtering logic for suspicious activity
-    for record in data_list:
-        # Threshold: More than 45 login attempts is considered a threat
-        if record["attempts"] > 45:
-            blocked_ips.append(record["ip"])
+    # Dividing the 1,000,000 records into chunks of 10,000
+    for i in range(0, len(total_data), chunk_size):
+        batch = total_data[i : i + chunk_size]
 
-    end_time = time.time()
-    duration = end_time - start_time
+        # Internal logic for each batch
+        for record in batch:
+            if record["attempts"] > 45:
+                threats_found += 1
 
+        processed_count += len(batch)
+        print(f"Progress: {processed_count} records analyzed...")
+
+    duration = time.time() - start_time
     return {
-        "status": "Success",
-        "processed_records": total_records,
-        "execution_time_seconds": round(duration, 4),
-        "threats_detected": len(blocked_ips),
+        "total_processed": processed_count,
+        "threats_detected": threats_found,
+        "execution_time": round(duration, 2),
     }
