@@ -1,25 +1,34 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
-import processor
-import security
+from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
+from database import SessionLocal, ThreatLog, create_tables
 
-app = FastAPI(title="Sentinel AI - Hannah Edition")
+# Initialize database tables on startup
+create_tables()
 
-
-class LogEntry(BaseModel):
-    ip: str
-    region: str
-    attempts: int
+app = FastAPI()
 
 
-@app.get("/")
-def home():
-    return {"message": "Sentinel AI Engine Online", "target": "Austin_Texas_L3"}
+# Dependency to get a database session for each request
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-@app.post("/analyze")
-def run_analysis(logs: List[dict]):
-    # Usamos el motor de procesamiento masivo
-    results = processor.process_massive_data(logs)
-    return results
+@app.post("/analyze-threat/")
+def analyze_and_save(ip: str, level: str, desc: str, db: Session = Depends(get_db)):
+    # 1. Create a new log instance using the ThreatLog model
+    new_log = ThreatLog(ip_address=ip, threat_level=level, description=desc)
+
+    # 2. Persist the record in the database (SQLAlchemy handles the INSERT statement)
+    db.add(new_log)
+    db.commit()
+    db.refresh(new_log)
+
+    return {
+        "status": "Saved",
+        "id": new_log.id,
+        "message": "Threat recorded in Sentinel DB",
+    }
