@@ -1,0 +1,24 @@
+# Secretos y Configuración
+.env
+.env.local
+
+# Entornos Virtuales (¡Muy importante!)
+venv/
+env/
+ENV/
+
+# Python (Archivos temporales)
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Frontend (React)
+node_modules/
+dist/
+build/
+
+# Sistema Operativo
+.DS_Store
+Thumbs.db
+*.db
+*.pyc
