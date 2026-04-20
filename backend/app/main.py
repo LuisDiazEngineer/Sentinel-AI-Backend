@@ -1,246 +1,260 @@
+import traceback
+import os
+import logging
+import asyncio
+import datetime
+from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
+
+# FastAPI y Seguridad
+from fastapi import FastAPI, Depends, HTTPException, Header, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
 
-# Importe del componente de Seguridad
-from fastapi.responses import (
-    HTMLResponse,
-)  # Importa respuesta HTML (aunque en este código no se usa realmente)
-import asyncio  # Librería para manejar tareas asíncronas (esperar sin que se bloquee)
-from fastapi import FastAPI, Depends, HTTPException, Request, status
-from langchain_google_genai import ChatGoogleGenerativeAI
+# SQLAlchemy
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy import func
 
-# Componentes principales del framework FastAPI
-from .auth import create_access_token, hash_password
+# Pydantic
+from pydantic import BaseModel, IPvAnyAddress
 
-# El punto (.) significa "busca en esta misma carpeta"
-from fastapi.responses import (
-    JSONResponse,
-)  # Permite devolver respuestas en formato JSON
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-)  # Sesión asíncrona para interactuar con la base de datos
-from sqlalchemy.future import (
-    select,
-)  # Permite hacer consultas tipo SELECT en SQLAlchemy
-from sqlalchemy import func  # Funciones SQL como COUNT(), NOW(), etc.
-from pydantic import (
-    BaseModel,
-)  # Sirve para validar datos de entrada (muy importante en APIs)
-from typing import Optional  # Permite definir campos opcionales
-from .database import (
-    engine,
-    Base,
-    get_db,
-    ThreatLog,
-    AsyncSessionLocal,
-)  # Importa configuración de BD y modelo
-import os, datetime, random  # Librerías estándar (archivos, tiempo, aleatorio)
-from fastapi.staticfiles import (
-    StaticFiles,
-)  # Sirve archivos estáticos (CSS, JS, imágenes)
-from fastapi.responses import FileResponse  # Permite devolver archivos como respuesta
-from fastapi.middleware.cors import (
-    CORSMiddleware,
-)  # Permite conectar frontend (React) con backend
+# 1. TUS ARCHIVOS LOCALES (Rutas Absolutas para evitar errores en Docker)
+# Unificamos todo en auth y database
+from app.database import User, engine, Base, get_db, ThreatLog
+from app.auth import is_secure_region, verify_password, create_access_token
 
-# Librerías de LangChain (IA)
-from langchain_core.prompts import PromptTemplate  # Para crear prompts dinámicos
-from langchain_community.llms import FakeListLLM  # Modelo de IA simulado (NO real)
-from langchain_core.output_parsers import (
-    StrOutputParser,
-)  # Convierte la salida de IA en texto plano
+# 2. SERVICIOS EXTERNOS
+from ai_service import analyze_threat_with_real_ai
+import google.generativeai as genai
+
+# 1. CARGA DE CONFIGURACIÓN
+BASE_DIR = Path(__file__).resolve().parent.parent
+dotenv_path = BASE_DIR / ".env"
+load_dotenv(dotenv_path=dotenv_path)
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# 2. CONFIGURACIÓN DE IA (CENTRALIZADA)
+import google.generativeai as genai
+
+api_key = os.getenv("GOOGLE_API_KEY")
+
+if api_key:
+    # Configuramos el SDK directamente
+    genai.configure(api_key=api_key)
+    logger.info("✅ [CONFIG] Google AI SDK configurado")
+else:
+    logger.error("❌ [CONFIG] No hay API KEY en el archivo .env")
+
+# 3. FASTAPI Y DB
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 app = FastAPI(title="Sentinel-AI Security Hub")
-# Crea la aplicación principal de FastAPI con un nombre (se verá en /docs)
 
-# Middleware CORS (permite que el frontend acceda a la API)
+SECRET_USER = os.getenv("ADMIN_USER")
+SECRET_PASS = os.getenv("ADMIN_PASSWORD")
+
+
+class ThreatCreate(BaseModel):
+    ip_address: IPvAnyAddress
+    description: Optional[str] = None
+
+
+class ThreatUpdate(BaseModel):
+    status: Optional[str] = None
+    description: Optional[str] = None
+    Threat_level: Optional[str] = None
+    location: Optional[str] = None
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173"
-    ],  # Solo permite requests desde ese origen (React)
-    allow_credentials=True,  # Permite cookies/autenticación
-    allow_methods=["*"],  # Permite todos los métodos HTTP (GET, POST, PUT, DELETE)
-    allow_headers=["*"],  # Permite todos los headers
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-
-# Modelo de datos para recibir amenazas
-class ThreatCreate(BaseModel):
-    ip_address: str  # Campo obligatorio: IP del atacante
-    description: Optional[str] = None  # Campo opcional: descripción del ataque
+# --- RESILIENCIA DE STARTUP ---
 
 
-# Evento que se ejecuta cuando inicia el servidor
 @app.on_event("startup")
 async def startup_event():
-    print("⏳ Iniciando Sentinel-AI: Verificando conexión...")  # Mensaje en consola
+    logger.info("🚀 INICIANDO SENTINEL-AI BACKEND")
 
-    for i in range(5):  # Intenta conectarse a la BD hasta 5 veces
+    # 1. 🛠️ CONEXIÓN A LA BASE DE DATOS
+    db_ok = False
+    for i in range(5):
         try:
-            async with engine.begin() as conn:  # Abre conexión asíncrona
+            async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
-                # Crea todas las tablas definidas en los modelos si no existen
-
-            print("[DATABASE] Conexión exitosa y tablas sincronizadas.")
-            break  # Si funciona, sale del bucle
-
+            logger.info("✅ [DATABASE] Tablas verificadas/creadas")
+            db_ok = True
+            break
         except Exception as e:
-            print(f"Intento {i+1} fallido.")  # Muestra intento fallido
-            print(f"Motivo técnico {e}")  # Muestra error
+            logger.warning(f"❌ [DATABASE] Intento {i+1}/5 fallido: {e}")
+            await asyncio.sleep(2)
 
-            if i < 4:
-                print(" Reintentando en 2 segundos...")
-                await asyncio.sleep(2)  # Espera 2 segundos antes de reintentar
+    # 2. 🤖 TEST RÁPIDO DE IA (Sin bloquear el puerto)
+    if api_key:
+        try:
+            # Solo creamos el modelo, no hacemos la llamada pesada aquí para no trabar el inicio
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            logger.info("✅ [AI] Modelo Gemini 1.5 Flash listo para peticiones")
+        except Exception as e:
+            logger.error(f"❌ [AI] Error al preparar modelo: {e}")
 
 
-# Middleware que intercepta TODAS las peticiones HTTP
-@app.middleware("http")
-async def monitor_and_ban_middleware(request: Request, call_next):
-    client_ip = request.client.host  # Obtiene la IP del cliente que hace la request
+# --- ENDPOINT PRINCIPAL (CORREGIDO) ---
 
-    # Evita bloquear rutas importantes (home, docs)
-    if request.url.path not in ["/", "/docs", "/openapi.json"]:
-        async with AsyncSessionLocal() as db:  # Abre sesión de BD
-            result = await db.execute(
-                select(func.count(ThreatLog.id)).where(
-                    ThreatLog.ip_address == client_ip
+
+@app.post("/threats/")
+async def create_threat(
+    threat_data: ThreatCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    ip = str(threat_data.ip_address)
+    desc = (threat_data.description or "Ataque detectado").strip()
+
+    # Llamada a la IA (ai_service.py)
+    try:
+        # Importante: analyze_threat_with_real_ai DEBE usar el SDK directo como pusimos anoche
+        report = await analyze_threat_with_real_ai(ip, desc)
+    except Exception as e:
+        logger.error(f"IA Error: {e}")
+        report = "Level: Medium. Análisis automático: Actividad sospechosa."
+
+    try:
+        new_log = ThreatLog(
+            ip_address=ip,
+            description=desc,
+            ai_analysis=report,
+            timestamp=datetime.datetime.now(),
+            # Lógica simple para extraer el nivel del texto de la IA
+            threat_level=(
+                "High"
+                if any(
+                    x in report.lower() for x in ["high", "critical", "severo", "alto"]
                 )
-            )
-            # Cuenta cuántas veces esa IP aparece en logs
+                else "Medium"
+            ),
+            status="Unresolved",
+        )
+        db.add(new_log)
+        await db.commit()
+        await db.refresh(new_log)
+        return {"status": "success", "analysis": report}
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"🔥 [DB ERROR]: {e}")
+        raise HTTPException(status_code=500, detail="Error de base de datos")
 
-            if result.scalar() >= 5:  # Si tiene 5 o más ataques registrados
-                return JSONResponse(
-                    status_code=403,  # Código HTTP: acceso prohibido
-                    content={"detail": "IP Banned by Sentinel-AI. Access Denied."},
-                )
 
-    return await call_next(request)
-    # Si no está bloqueada, deja pasar la request al endpoint correspondiente
+@app.put("/threats/{threat_id}", tags=["Protocolo ZL1"])
+async def update_threat(
+    threat_id: int,
+    update_data: ThreatUpdate,
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+):
+    """
+    Permite al administrador modificar el estado de una amenaza.
+    Ejemplo: Cambiar status de 'BLOCKED' a 'RESOLVED'.
+    """
+    # 1. Buscar el registro
+    result = await db.execute(select(ThreatLog).where(ThreatLog.id == threat_id))
+    threat_entry = result.scalar_one_or_none()
+
+    if not threat_entry:
+        logger.warning(f"⚠️ Intentaron actualizar ID {threat_id} inexistente")
+        raise HTTPException(status_code=404, detail="El ID de amenaza no existe")
+
+    # 2. Aplicar cambios solo en los campos enviados
+    data_to_update = update_data.dict(exclude_unset=True)
+    for key, value in data_to_update.items():
+        setattr(threat_entry, key, value)
+
+    try:
+        await db.commit()
+        await db.refresh(threat_entry)
+        logger.info(f"✅ [DATABASE] Registro {threat_id} actualizado exitosamente")
+        return {"status": "updated", "id": threat_id, "new_data": data_to_update}
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"🔥 Error al actualizar DB: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al actualizar")
 
 
-def get_ai_analysis(ip: str, threat_type: str):
-    # Configurar la IA Real de Google
-    print(os.getenv("GOOGLE_API_KEY"))
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-        temperature=0.7,
+@app.delete(
+    "/threats/{threat_id}",
+    tags=["Protocolo ZL1"],
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_threat(
+    threat_id: int,
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
+):
+    """
+    Elimina un registro del sistema.
+    Requiere token de administrador.
+    """
+    result = await db.execute(select(ThreatLog).where(ThreatLog.id == threat_id))
+    threat_entry = result.scalar_one_or_none()
+
+    if not threat_entry:
+        raise HTTPException(
+            status_code=404, detail="No se encontró el registro para eliminar"
+        )
+
+    try:
+        await db.delete(threat_entry)
+        await db.commit()
+        logger.warning(f"🗑️ [DATABASE] Registro {threat_id} eliminado del sistema")
+        return None  # Status 204 no requiere respuesta
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"🔥 Error al eliminar de DB: {e}")
+        raise HTTPException(status_code=500, detail="Error al procesar la eliminación")
+
+
+@app.get("/stats/", tags=["Dashboard"])
+async def get_stats(
+    db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme)
+):
+    """Calcula estadísticas detalladas de amenazas."""
+    # Usamos 'token' en un print solo para que VS Code vea que se usa
+    print(f"Consulta autorizada por el token")
+
+    query = select(ThreatLog.threat_level, func.count(ThreatLog.id)).group_by(
+        ThreatLog.threat_level
     )
-
-    # Tu plantilla (Template) que ya tenías
-    template = """
-    System: You are an AI Security Specialist for Sentinel-AI.
-    Context: A potential threat has been detected in the network logs.
-    IP Address: {ip}
-    Threat Category: {threat_type}
-    
-    Task: Provide a concise technical recommendation (max 3 bullet points) for a DevOps engineer to mitigate this specific threat.
-    """
-
-    prompt = PromptTemplate.from_template(template)
-
-    # El Pipeline (La cadena)
-    chain = prompt | llm | StrOutputParser()
-
-    # Ejecución real
-    return chain.invoke({"ip": ip, "threat_type": threat_type})
-
-
-# Endpoint raíz ("/")
-@app.get("/", response_class=FileResponse)
-async def read_index():
-    """
-    Sirve el archivo index.html del frontend.
-    """
-    return FileResponse(os.path.join("frontend", "index.html"))
-    # Devuelve el archivo HTML principal
-
-
-# Monta carpeta de archivos estáticos si existe
-if os.path.exists("frontend"):
-    app.mount("/static", StaticFiles(directory="frontend"), name="static")
-    # Permite acceder a archivos como CSS, JS, imágenes
-else:
-    print("⚠️ Carpeta 'frontend' no encontrada.")
-
-
-# Endpoint para analizar amenazas con IA
-@app.post("/analyze-threat")
-async def analyze(threat: ThreatCreate, token: str = Depends(oauth2_scheme)):
-    nivel = threat.description or "General Attack"
-
-    analysis = get_ai_analysis(ip=threat.ip_address, threat_type=nivel)
+    result = await db.execute(query)
+    stats = result.all()
 
     return {
-        "status": "success",
-        "ai_report": analysis,
-        "debug_info": f"Analizado bajo nivel: {nivel}",
+        "total": sum(count for level, count in stats),
+        "breakdown": {level: count for level, count in stats},
     }
 
 
-# Endpoint para crear logs de amenazas
-@app.post("/logs/", status_code=201)
-async def create_threat_log(threat: ThreatCreate, db: AsyncSession = Depends(get_db)):
-    try:
-
-        # Detecta ubicación básica según IP (muy simple)
-        detected_location = (
-            "San Martin de Porres, PE" if "190.235" in threat.ip_address else "Unknown"
-        )
-
-        # Cuenta cuántos ataques tiene esa IP
-        result = await db.execute(
-            select(func.count(ThreatLog.id)).where(
-                ThreatLog.ip_address == threat.ip_address
-            )
-        )
-        attack_count = result.scalar()
-
-        # Define prioridad según número de ataques
-        priority = "CRITICAL" if attack_count >= 5 else "LOW"
-
-        # Genera recomendación de IA
-        ai_recommendation = get_ai_analysis(
-            threat.ip_address, threat.description or "General Attack"
-        )
-
-        # Crea objeto del log
-        new_log = ThreatLog(
-            ip_address=threat.ip_address,
-            location=detected_location,
-            threat_level=priority,
-            status="BLOCKED" if attack_count >= 5 else "OPEN",
-            description=threat.description or "No details provided",
-            ai_analysis=ai_recommendation,
-        )
-
-        db.add(new_log)  # Agrega a la sesión
-        await db.commit()  # Guarda en la BD
-        await db.refresh(new_log)  # Actualiza datos del objeto
-
-        return {
-            "message": "Log analyzed by Sentinel-AI",
-            "data": {
-                "id": new_log.id,
-                "ai_report": ai_recommendation,
-            },
-        }
-
-    except Exception as e:
-        await db.rollback()  # Si falla, revierte cambios
-        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
-
-
-# Endpoint de ejemplo con ataques fake
-@app.get("/ataques")
-async def obtener_ataques():
-    return [
-        {"ip": "192.168.1.10", "accion": "Intento de Brute Force"},
-        {"ip": "10.0.0.5", "accion": "Escaneo de Puertos"},
-        {"ip": "172.16.0.25", "accion": "Inyección SQL Detenida"},
-    ]
+# 🔹 ENDPOINT ATTACKS (PARA EL DASHBOARD)
+@app.get("/threats/", tags=["Dashboard"])
+async def get_all_threats(
+    db: AsyncSession = Depends(get_db),
+    # 🔓 Nota: No le pongas el token aquí para que el Dashboard pueda leerlo directo
+):
+    """Retorna todas las amenazas de la DB para el Dashboard"""
+    # Usamos ThreatLog porque es el nombre de tu modelo en SQLAlchemy
+    result = await db.execute(select(ThreatLog).order_by(ThreatLog.timestamp.desc()))
+    threats = result.scalars().all()
+    return threats
+    # IMPORTANTE: Aseguramos que la llave sea 'ip_address'
 
 
 # Endpoint para obtener todos los logs
@@ -251,54 +265,81 @@ async def get_threat_logs(db: AsyncSession = Depends(get_db)):
 
 
 # Endpoint de estadísticas
-@app.get("/stats/")
-async def get_threat_stats(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(ThreatLog.threat_level, func.count(ThreatLog.id)).group_by(
-            ThreatLog.threat_level
-        )
+@app.get("/stats/", tags=["Dashboard"])
+async def get_stats(
+    db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),  # <--- PROTEGIDO
+):
+    """Calcula estadísticas solo para analistas autorizados."""
+    query = select(ThreatLog.threat_level, func.count(ThreatLog.id)).group_by(
+        ThreatLog.threat_level
     )
+    result = await db.execute(query)
     stats = result.all()
 
     return {
-        "status": "Sentinel Active",
-        "summary": {level: count for level, count in stats},  # Conteo por nivel
-        "total_threats": sum(count for level, count in stats),  # Total general
+        "total": sum(count for level, count in stats),
+        "breakdown": {level: count for level, count in stats},
     }
 
 
-# Endpoint de salud del sistema
-@app.get("/health")
-async def health_check(session: AsyncSession = Depends(get_db)):
-    try:
-        await session.execute(select(func.now()))  # Ejecuta consulta simple a BD
-
-        return {
-            "status": "healthy",
-            "database": "connected",
-            "timestamp": datetime.datetime.now(),  # Hora actual
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unhealthy: {str(e)}")
-
-
-load_dotenv()  # Carga las variables del archivo .env
-
-# Ahora usas las variables así:
-SECRET_USER = os.getenv("ADMIN_USER")
-SECRET_PASS = os.getenv("ADMIN_PASSWORD")
-MY_GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-
-
-# 3. El Portal de Acceso (Aquí es donde entra python-multipart)
 @app.post("/token")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    if form_data.username == SECRET_USER and form_data.password == SECRET_PASS:
-        return {"access_token": "sentinel_secret_token", "token_type": "bearer"}
+async def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: AsyncSession = Depends(get_db),
+    x_region: str = Header(None),  # Header para la zona de riesgo
+):
+    try:
+        # 1. FILTRO SENTINEL: ¿Es una zona segura?
+        # Antes de gastar recursos en la DB, validamos la región
+        print(f"DEBUG: Validando acceso desde región: {x_region}")
+        if not is_secure_region(x_region):
+            print(f"🚨 BLOQUEO: Intento de acceso desde zona de riesgo: {x_region}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Acceso denegado: Protocolo Sentinel activo para esta región.",
+            )
 
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Credenciales incorrectas",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+        # 2. INTENTO DE LOGIN
+        print(f"DEBUG: Buscando usuario: {form_data.username}")
+        result = await db.execute(
+            select(User).where(User.username == form_data.username)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            print("DEBUG: Usuario no encontrado")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Credenciales inválidas",
+            )
+
+        # 3. VERIFICACIÓN DE HASH (Pase VIP)
+        # Usamos el pwd_context de tu archivo auth
+        try:
+            es_valido = verify_password(form_data.password, user.hashed_password)
+        except Exception as e:
+            print(f"DEBUG: Error en motor de hashing: {e}")
+            raise HTTPException(status_code=500, detail="Error en sistema de seguridad")
+
+        if not es_valido:
+            print(f"DEBUG: Contraseña incorrecta para {form_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Credenciales inválidas",
+            )
+
+        # 4. GENERACIÓN DEL TOKEN
+        # El sub (subject) es lo más importante del payload
+        token_data = {"sub": user.username, "role": user.role}
+        access_token = create_access_token(data=token_data)
+
+        print(f"✅ LOGIN EXITOSO: {user.username} ha ingresado.")
+        return {"access_token": access_token, "token_type": "bearer"}
+
+    except HTTPException as http_e:
+        raise http_e
+    except Exception as e:
+        print("!!! ERROR CRÍTICO !!!")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
