@@ -5,6 +5,36 @@
     --font-mono: "JetBrains Mono", ui-mono, SFMono-Regular, monospace;
 }
 
+/* Reset básico para que el dashboard ocupe toda la pantalla sin bordes blancos */
+body,
+html,
+#root {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background-color: black;
+    /* El fondo de Austin */
+}
+
+/* Estilos de Leaflet y Scrollbar que ya tienes (¡están excelentes!) */
+.leaflet-container {
+    background: #020617 !important;
+    outline: none;
+}
+
+/* Hacer que el contenedor del mapa sea realmente oscuro mientras carga */
+.leaflet-container {
+    background: #020617 !important;
+    outline: none;
+}
+
+/* Opcional: Cambiar el color de los botones de zoom para que no sean tan brillantes */
+.leaflet-bar a {
+    background-color: #1e293b !important;
+    color: #3b82f6 !important;
+    border: 1px solid #334155 !important;
+}
+
 /* Toque extra para que el scroll se vea pro como en Austin */
 ::-webkit-scrollbar {
     width: 8px;

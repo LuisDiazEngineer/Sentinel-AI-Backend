@@ -1,3 +1,4 @@
+import random
 import traceback
 import os
 import logging
@@ -6,6 +7,7 @@ import datetime
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
+import httpx
 
 # FastAPI y Seguridad
 from fastapi import FastAPI, Depends, HTTPException, Header, status
@@ -18,7 +20,7 @@ from sqlalchemy.future import select
 from sqlalchemy import func
 
 # Pydantic
-from pydantic import BaseModel, IPvAnyAddress
+from pydantic import BaseModel, Field
 
 # 1. TUS ARCHIVOS LOCALES (Rutas Absolutas para evitar errores en Docker)
 # Unificamos todo en auth y database
@@ -61,15 +63,26 @@ SECRET_PASS = os.getenv("ADMIN_PASSWORD")
 
 
 class ThreatCreate(BaseModel):
-    ip_address: IPvAnyAddress
+    ip_address: str
     description: Optional[str] = None
+    risk_score: Optional[int] = Field(default=0, ge=0, le=100)
+    country_code: Optional[str] = None
+    city: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    isp: Optional[str] = None
 
 
 class ThreatUpdate(BaseModel):
     status: Optional[str] = None
     description: Optional[str] = None
-    Threat_level: Optional[str] = None
-    location: Optional[str] = None
+    threat_level: Optional[str] = None
+    risk_score: Optional[int] = 0
+    country_code: Optional[str] = None
+    city: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    isp: Optional[str] = None
 
 
 app.add_middleware(
@@ -117,77 +130,91 @@ async def startup_event():
 async def create_threat(
     threat_data: ThreatCreate,
     db: AsyncSession = Depends(get_db),
+    token: str = Depends(oauth2_scheme),
 ):
     ip = str(threat_data.ip_address)
     desc = (threat_data.description or "Ataque detectado").strip()
 
-    # Llamada a la IA (ai_service.py)
+    # 🌍 1. Obtener Geolocalización con validación extra
+    geo_data = {}
     try:
-        # Importante: analyze_threat_with_real_ai DEBE usar el SDK directo como pusimos anoche
-        report = await analyze_threat_with_real_ai(ip, desc)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://ip-api.com/json/{ip}", timeout=5.0)
+            if response.status_code == 200:
+                geo_data = response.json()
     except Exception as e:
-        logger.error(f"IA Error: {e}")
-        report = "Level: Medium. Análisis automático: Actividad sospechosa."
+        logger.error(f"🌐 GeoIP Error: {e}")
 
+    # Sanitización de datos geográficos (Evita que entren Nones a la DB)
+    country_name = geo_data.get("country") or "Global"
+    city_name = geo_data.get("city") or "Unknown"
+    # Aseguramos que lat/lon sean float y no rompan el insert
+    try:
+        lat = float(geo_data.get("lat", 0.0))
+        lon = float(geo_data.get("lon", 0.0))
+    except (TypeError, ValueError):
+        lat, lon = 0.0, 0.0
+
+    isp_name = geo_data.get("isp") or "Unknown ISP"
+
+    # 🧠 2. Llamada a la IA
+    try:
+        report = await analyze_threat_with_real_ai(ip, desc)
+        # ⚠️ IMPORTANTE: Recortamos el reporte si es muy largo para la columna de la DB
+        if report and len(report) > 500:
+            report = report[:497] + "..."
+    except Exception as e:
+        logger.error(f"🧠 AI Error: {e}")
+        report = "Análisis en proceso..."
+
+    # 📊 3. Calcular Risk Score
+    base_score = 20 + random.randint(0, 10)
+    if any(x in desc.lower() for x in ["sql", "injection", "ddos", "brute force"]):
+        base_score += 50
+    if any(x in report.lower() for x in ["high", "critical", "danger"]):
+        base_score += 25
+
+    final_score = min(base_score, 100)
+
+    # 🛡️ 4. Persistencia Segura
     try:
         new_log = ThreatLog(
             ip_address=ip,
-            description=desc,
+            description=desc[:250],  # Limitamos descripción
             ai_analysis=report,
             timestamp=datetime.datetime.now(),
-            # Lógica simple para extraer el nivel del texto de la IA
             threat_level=(
-                "High"
-                if any(
-                    x in report.lower() for x in ["high", "critical", "severo", "alto"]
-                )
-                else "Medium"
+                "Critical"
+                if final_score > 75
+                else "High" if final_score > 45 else "Medium"
             ),
-            status="Unresolved",
+            risk_score=final_score,
+            country_code=country_name[:100],  # Evitamos desbordamiento
+            city=city_name[:100],
+            latitude=lat,
+            longitude=lon,
+            isp=isp_name[:100],
         )
+
         db.add(new_log)
         await db.commit()
         await db.refresh(new_log)
-        return {"status": "success", "analysis": report}
+
+        return {
+            "status": "success",
+            "analysis": report,
+            "score": final_score,
+            "location": f"{city_name}, {country_name}",
+        }
+
     except Exception as e:
         await db.rollback()
-        logger.error(f"🔥 [DB ERROR]: {e}")
-        raise HTTPException(status_code=500, detail="Error de base de datos")
-
-
-@app.put("/threats/{threat_id}", tags=["Protocolo ZL1"])
-async def update_threat(
-    threat_id: int,
-    update_data: ThreatUpdate,
-    db: AsyncSession = Depends(get_db),
-    token: str = Depends(oauth2_scheme),
-):
-    """
-    Permite al administrador modificar el estado de una amenaza.
-    Ejemplo: Cambiar status de 'BLOCKED' a 'RESOLVED'.
-    """
-    # 1. Buscar el registro
-    result = await db.execute(select(ThreatLog).where(ThreatLog.id == threat_id))
-    threat_entry = result.scalar_one_or_none()
-
-    if not threat_entry:
-        logger.warning(f"⚠️ Intentaron actualizar ID {threat_id} inexistente")
-        raise HTTPException(status_code=404, detail="El ID de amenaza no existe")
-
-    # 2. Aplicar cambios solo en los campos enviados
-    data_to_update = update_data.dict(exclude_unset=True)
-    for key, value in data_to_update.items():
-        setattr(threat_entry, key, value)
-
-    try:
-        await db.commit()
-        await db.refresh(threat_entry)
-        logger.info(f"✅ [DATABASE] Registro {threat_id} actualizado exitosamente")
-        return {"status": "updated", "id": threat_id, "new_data": data_to_update}
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"🔥 Error al actualizar DB: {e}")
-        raise HTTPException(status_code=500, detail="Error interno al actualizar")
+        # Esto imprimirá el error REAL en tu terminal de Uvicorn
+        logger.error(f"🔥 [DB CRITICAL ERROR]: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database Integrity Error: Verifica los logs del servidor",
+        )
 
 
 @app.delete(
