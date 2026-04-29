@@ -1,6 +1,7 @@
 # Secretos y Configuración
 .env
 .env.local
+!.env.example
 
 # Entornos Virtuales (¡Muy importante!)
 venv/
