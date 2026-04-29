@@ -1,11 +1,18 @@
+/* 1. IMPORTACIÓN DE MOTOR */
+/* Relación: Carga el núcleo de Tailwind CSS v4 para habilitar todas las utilidades de diseño. */
 @import "tailwindcss";
 
+/* 2. DEFINICIÓN DE TIPOGRAFÍA (THEME) */
+/* Relación: Establece las fuentes oficiales del proyecto. 
+   'Inter' para lectura limpia y 'JetBrains Mono' para ese look de código técnico/hacking. */
 @theme {
     --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-mono, SFMono-Regular, monospace;
 }
 
-/* Reset básico para que el dashboard ocupe toda la pantalla sin bordes blancos */
+/* 3. RESET ESTRUCTURAL */
+/* Relación: Asegura que la aplicación sea "Full-Bleed" (sin márgenes blancos).
+   El fondo negro es vital para que los efectos de neón y las luces de los componentes resalten. */
 body,
 html,
 #root {
@@ -13,37 +20,41 @@ html,
     padding: 0;
     height: 100%;
     background-color: black;
-    /* El fondo de Austin */
 }
 
-/* Estilos de Leaflet y Scrollbar que ya tienes (¡están excelentes!) */
+/* 4. PERSONALIZACIÓN DE LEAFLET (MAPA) */
+/* Relación: Sobrescribe el fondo por defecto del mapa para que coincida con el modo oscuro.
+   '!important' es necesario para ganarle a los estilos internos de la librería Leaflet. */
 .leaflet-container {
     background: #020617 !important;
     outline: none;
 }
 
-/* Hacer que el contenedor del mapa sea realmente oscuro mientras carga */
-.leaflet-container {
-    background: #020617 !important;
-    outline: none;
-}
-
-/* Opcional: Cambiar el color de los botones de zoom para que no sean tan brillantes */
+/* 5. UI DE NAVEGACIÓN DEL MAPA */
+/* Relación: Estiliza los botones de Zoom (+ / -) para que sigan la paleta de colores slate/blue,
+   evitando el blanco genérico que rompería la estética del dashboard. */
 .leaflet-bar a {
     background-color: #1e293b !important;
     color: #3b82f6 !important;
     border: 1px solid #334155 !important;
 }
 
-/* Toque extra para que el scroll se vea pro como en Austin */
+/* 6. SCROLLBAR PERSONALIZADO (THE PRO TOUCH) */
+/* Relación: Cambia la barra de desplazamiento estándar del navegador por una versión minimalista. */
+
+/* Ancho de la barra */
 ::-webkit-scrollbar {
     width: 8px;
 }
 
+/* El fondo por donde corre el scroll (Track) */
 ::-webkit-scrollbar-track {
     @apply bg-slate-950;
 }
 
+/* La pieza que el usuario arrastra (Thumb) */
+/* Detalle: El 'hover:bg-red-600' es un guiño al modo Lockdown; 
+   cuando el usuario interactúa, la interfaz responde con colores de alerta. */
 ::-webkit-scrollbar-thumb {
     @apply bg-slate-800 rounded-full hover:bg-red-600 transition-colors;
 }

@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Lock, User } from 'lucide-react';
+import { useAuth } from '../context/AuthContext'; // 1. Importamos el hook
 
-const Login = ({ onLoginSuccess }) => {
+const LoginScreen = ({ onLoginSuccess }) => {
+    const { login } = useAuth(); // 2. Extraemos la función login del contexto
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
@@ -12,7 +14,6 @@ const Login = ({ onLoginSuccess }) => {
         setLoading(true);
         setError('');
 
-        // Preparamos los datos como Form Data (que es lo que pide OAuth2 en FastAPI)
         const formData = new URLSearchParams();
         formData.append('username', username);
         formData.append('password', password);
@@ -26,8 +27,12 @@ const Login = ({ onLoginSuccess }) => {
 
             if (response.ok) {
                 const data = await response.json();
-                localStorage.setItem('token', data.access_token);
-                onLoginSuccess(); // Esto desbloquea el Dashboard
+
+                // 3. Usamos la función del contexto en lugar de solo localStorage.
+                // Esto actualiza el estado global 'isAuthenticated' automáticamente.
+                await login(data.access_token);
+
+                onLoginSuccess();
             } else {
                 setError('Credenciales inválidas. Acceso denegado.');
             }
@@ -42,7 +47,6 @@ const Login = ({ onLoginSuccess }) => {
         <div className="flex items-center justify-center min-h-screen bg-slate-950 font-sans">
             <div className="w-full max-w-md p-8 space-y-6 bg-slate-900/50 border border-slate-800 rounded-2xl backdrop-blur-xl shadow-2xl shadow-blue-500/10">
 
-                {/* Header con Icono */}
                 <div className="flex flex-col items-center">
                     <div className="p-3 bg-blue-500/10 rounded-full mb-4">
                         <ShieldCheck className="w-12 h-12 text-blue-500" />
@@ -52,7 +56,6 @@ const Login = ({ onLoginSuccess }) => {
                 </div>
 
                 <form onSubmit={handleSubmit} className="space-y-4">
-                    {/* Campo Usuario */}
                     <div className="relative">
                         <User className="absolute left-3 top-3 w-5 h-5 text-slate-500" />
                         <input
@@ -65,7 +68,6 @@ const Login = ({ onLoginSuccess }) => {
                         />
                     </div>
 
-                    {/* Campo Password */}
                     <div className="relative">
                         <Lock className="absolute left-3 top-3 w-5 h-5 text-slate-500" />
                         <input
@@ -99,4 +101,4 @@ const Login = ({ onLoginSuccess }) => {
     );
 };
 
-export default Login;
+export default LoginScreen;
